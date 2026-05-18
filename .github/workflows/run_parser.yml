@@ -10,8 +10,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # ИСПРАВЛЕНО: убрано лишнее "actions/" из пути репозитория экшена
     - name: Checkout repository code
-      uses: actions/actions/checkout@v4
+      uses: actions/checkout@v4
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -34,4 +35,3 @@ jobs:
         name: telemetr-leads-excel
         path: vpn_leads_telemetr.xlsx
         retention-days: 7
-
