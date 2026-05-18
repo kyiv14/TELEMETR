@@ -2,117 +2,92 @@ import os
 import requests
 import pandas as pd
 import time
+import re
 
-TELEMETR_API_KEY = os.getenv("TELEMETR_API_KEY")
-
-CATEGORIES = [12, 17, 23] 
-MIN_MEMBERS = 3000        
-MAX_MEMBERS = 30000       
-MIN_ERR = 15              
-MAX_PAGES = 2             
-
-# Список возможных вариантов URL эндпоинтов API Telemetr
-URL_VARIANTS = [
-    "https://api.telemetr.me/v1/channels",
-    "https://api.telemetr.me/v1/channels/search",
-    "https://api.telemetr.me/v1/public/channels",
-    "https://api.telemetr.me/channels"
-]
+# Нам больше не нужны токены и куки! Скрипт парсит открытый веб-каталог.
+# Список популярных категорий Telemetr (можно менять ID)
+CATEGORIES = [12, 17, 23] # 12 - ИТ, 17 - Маркетинг, 23 - Бизнес
 
 def start_parsing():
-    if not TELEMETR_API_KEY:
-        print("❌ КРИТИЧЕСКАЯ ОШИБКА: API-ключ Telemetr не найден в секретах GitHub!")
-        return
-
+    # Имитируем обычный браузер, чтобы сайт отдавал нам контент
     headers = {
-        "Authorization": f"Bearer {TELEMETR_API_KEY}",
-        "Accept": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
     }
     
-    # 1. Сначала подбираем рабочий эндпоинт
-    working_url = None
-    print("🔍 Тестируем эндпоинты API Telemetr на доступность...")
-    
-    test_params = {"category_id": 12, "page": 1, "limit": 1}
-    for url in URL_VARIANTS:
-        try:
-            res = requests.get(url, headers=headers, params=test_params)
-            print(f"   Проверка {url} -> Статус: {res.status_code}")
-            if res.status_code == 200:
-                working_url = url
-                print(f"✅ Найдена рабочая точка доступа: {working_url}")
-                break
-        except Exception as e:
-            print(f"   Сбой сети для {url}: {e}")
-            
-    if not working_url:
-        print("❌ ОШИБКА: Ни один из известных адресов API не вернул статус 200.")
-        print("Проверьте, не заблокирован ли ваш токен на тарифе 'Старт' для работы с внешним API.")
-        return
-
-    # 2. Основной цикл парсинга по рабочему URL
     leads = []
-    print("\n🤖 Начинаем сбор данных...")
+    print("🤖 Запуск автономного веб-скрейпера каналов Telemetr...")
     
     for cat_id in CATEGORIES:
-        print(f"📡 Сканируем категорию ID: {cat_id}...")
+        print(f"📡 Сканируем открытую категорию ID: {cat_id}...")
         
-        for page in range(1, MAX_PAGES + 1):
-            params = {
-                "category_id": cat_id,
-                "participants_from": MIN_MEMBERS,
-                "participants_to": MAX_MEMBERS,
-                "err_from": MIN_ERR,
-                "page": page
-            }
+        # Запрашиваем публичную веб-страницу категории
+        url = f"https://telemetr.me/channels/cat/{cat_id}/"
+        
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
             
-            try:
-                response = requests.get(working_url, headers=headers, params=params)
+            if response.status_code == 200:
+                html_content = response.text
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    channels = data.get("results", []) or data.get("data", [])
+                # Ищем блоки каналов с помощью регулярных выражений (чтобы не ставить дополнительные тяжелые библиотеки)
+                # Находим ссылки на каналы вида /channels/12345-username/
+                channel_blocks = re.findall(r'href="/channels/(\d+)-([^/"]+)/"', html_content)
+                
+                if not channel_blocks:
+                    print(f"   ⚠️ На открытой странице категории {cat_id} не найдено каналов. Возможно, изменилась верстка.")
+                    continue
+                
+                # Убираем дубликаты каналов на странице
+                unique_channels = list(set(channel_blocks))
+                print(f"   Найдено {len(unique_channels)} потенциальных каналов...")
+                
+                for ch_id, ch_username in unique_channels[:15]: # Берем первые 15 каналов для теста лимитов
+                    # Формируем прямую ссылку на Телеграм-канал
+                    tg_link = f"https://t.me/{ch_username}"
                     
-                    if not channels:
-                        break
-                        
-                    for ch in channels:
-                        about = ch.get("about", "") or ch.get("description", "")
-                        username = ch.get("username", "N/A")
-                        
-                        contact = "Проверить вручную"
-                        for word in about.split():
-                            if "@" in word and not word.lower().endswith("bot") and len(word) > 4:
-                                contact = word.strip(".,()![]{} ")
-                                break
-                        
-                        leads.append({
-                            "Канал": ch.get("title", ch.get("name", "Без имени")),
-                            "Ссылка": f"https://t.me/{username}" if username != "N/A" else "N/A",
-                            "Подписчики": ch.get("participants_count", ch.get("subscribers", 0)),
-                            "ERR": f"{ch.get('err', 0)}%",
-                            "Контакт для связи": contact,
-                            "Статус": "Ожидает отправки оффера"
-                        })
+                    # Для поиска контактов админа заглядываем на открытую страницу описания канала
+                    ch_url = f"https://telemetr.me/channels/{ch_id}-{ch_username}/"
+                    contact = "Проверить в описании"
                     
-                    print(f"   Успешно обработана страница {page}")
-                    time.sleep(1)
-                else:
-                    print(f"   ⚠️ Ошибка на странице {page}: Статус {response.status_code}")
-                    break
-            except Exception as e:
-                print(f"   ❌ Сбой: {e}")
-                break
+                    try:
+                        ch_res = requests.get(ch_url, headers=headers, timeout=5)
+                        if ch_res.status_code == 200:
+                            # Ищем юзернеймы админов через @ в блоке описания
+                            description = ch_res.text
+                            found_contacts = re.findall(r'@[a-zA-Z0-9___]{4,32}', description)
+                            # Отсекаем ботов, если они нашлись
+                            valid_contacts = [c for c in found_contacts if not c.lower().endswith('bot')]
+                            if valid_contacts:
+                                contact = valid_contacts[0]
+                    except:
+                        pass
+                        
+                    leads.append({
+                        "Канал": ch_username,
+                        "Ссылка": tg_link,
+                        "Контакт для связи": contact,
+                        "Статус": "Ожидает отправки оффера"
+                    })
+                    time.sleep(1) # Небольшая пауза, чтобы сайт не забанил по IP
+                    
+                print(f"   Категория {cat_id} успешно обработана.")
+            else:
+                print(f"   ⚠️ Не удалось открыть страницу категории. Статус: {response.status_code}")
+        except Exception as e:
+            print(f"   ❌ Ошибка запроса: {e}")
+            continue
 
-    # 3. Сохранение результатов
+    # Сохраняем в файл
     if leads:
         df = pd.DataFrame(leads)
         filename = "vpn_leads_telemetr.xlsx"
         df.to_excel(filename, index=False, engine='openpyxl')
-        print(f"\n🎉 Парсинг успешно завершен! Собрано лидов: {len(leads)}")
-        print(f"💾 Файл сохранен как: {filename}")
+        print(f"\n🎉 Сбор успешно окончен! Создано лидов: {len(leads)}")
+        print(f"💾 Файл сохранен на GitHub как: {filename}")
     else:
-        print("\n❌ База пуста.")
+        print("\n❌ Не удалось собрать данные. Сайт заблокировал запрос или изменил структуру страниц.")
 
 if __name__ == "__main__":
     start_parsing()
