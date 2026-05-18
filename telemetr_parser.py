@@ -1,29 +1,27 @@
-import os
 import requests
 import pandas as pd
 import time
 import re
 
-# Нам больше не нужны токены и куки! Скрипт парсит открытый веб-каталог.
-# Список популярных категорий Telemetr (можно менять ID)
-CATEGORIES = [12, 17, 23] # 12 - ИТ, 17 - Маркетинг, 23 - Бизнес
+# Список категорий TGStat: tech - ИТ, marketing - Маркетинг, business - Бизнес
+CATEGORIES = ["tech", "marketing", "business"]
 
 def start_parsing():
-    # Имитируем обычный браузер, чтобы сайт отдавал нам контент
+    # Эмулируем обычный чистый браузер
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
     }
     
     leads = []
-    print("🤖 Запуск автономного веб-скрейпера каналов Telemetr...")
+    print("🤖 Запуск автономного парсера каналов через каталог TGStat...")
     
-    for cat_id in CATEGORIES:
-        print(f"📡 Сканируем открытую категорию ID: {cat_id}...")
+    for category in CATEGORIES:
+        print(f"📡 Сканируем открытую категорию: {category}...")
         
-        # Запрашиваем публичную веб-страницу категории
-        url = f"https://telemetr.me/channels/cat/{cat_id}/"
+        # Публичный URL рейтинга каналов в РФ/СНГ по выбранной теме
+        url = f"https://tgstat.ru/ru/research/{category}/channels?sort=members"
         
         try:
             response = requests.get(url, headers=headers, timeout=15)
@@ -31,63 +29,73 @@ def start_parsing():
             if response.status_code == 200:
                 html_content = response.text
                 
-                # Ищем блоки каналов с помощью регулярных выражений (чтобы не ставить дополнительные тяжелые библиотеки)
-                # Находим ссылки на каналы вида /channels/12345-username/
-                channel_blocks = re.findall(r'href="/channels/(\d+)-([^/"]+)/"', html_content)
+                # Извлекаем названия каналов и их юзернеймы из ссылок вида href="https://tgstat.ru/channel/@username"
+                raw_channels = re.findall(r'href="https://tgstat\.ru/channel/(@[a-zA-Z0-9___]{4,32})"', html_content)
                 
-                if not channel_blocks:
-                    print(f"   ⚠️ На открытой странице категории {cat_id} не найдено каналов. Возможно, изменилась верстка.")
+                # Извлекаем читаемые имена каналов для таблицы
+                titles = re.findall(r'font-16 text-dark text-truncate b-600[^>]*>\s*([^<]+)', html_content)
+                
+                if not raw_channels:
+                    print(f"   ⚠️ На странице категории {category} не найдено каналов.")
                     continue
                 
-                # Убираем дубликаты каналов на странице
-                unique_channels = list(set(channel_blocks))
-                print(f"   Найдено {len(unique_channels)} потенциальных каналов...")
+                # Очищаем от дублей
+                unique_usernames = []
+                for username in raw_channels:
+                    if username not in unique_usernames:
+                        unique_usernames.append(username)
                 
-                for ch_id, ch_username in unique_channels[:15]: # Берем первые 15 каналов для теста лимитов
-                    # Формируем прямую ссылку на Телеграм-канал
-                    tg_link = f"https://t.me/{ch_username}"
+                print(f"   Найдено {len(unique_usernames)} живых каналов. Собираем контакты...")
+                
+                for idx, username in enumerate(unique_usernames[:15]): # Берем ТОП-15 из каждой категории
+                    clean_username = username.replace("@", "")
+                    tg_link = f"https://t.me/{clean_username}"
                     
-                    # Для поиска контактов админа заглядываем на открытую страницу описания канала
-                    ch_url = f"https://telemetr.me/channels/{ch_id}-{ch_username}/"
-                    contact = "Проверить в описании"
+                    # Пытаемся вытянуть имя канала, если массивы совпали, иначе берем юзернейм
+                    channel_title = titles[idx].strip() if idx < len(titles) else clean_username
+                    
+                    # Переходим на страницу канала на самом TGStat, чтобы забрать описание и контакты админа
+                    info_url = f"https://tgstat.ru/channel/@{clean_username}"
+                    contact = "Проверить описание"
                     
                     try:
-                        ch_res = requests.get(ch_url, headers=headers, timeout=5)
-                        if ch_res.status_code == 200:
-                            # Ищем юзернеймы админов через @ в блоке описания
-                            description = ch_res.text
-                            found_contacts = re.findall(r'@[a-zA-Z0-9___]{4,32}', description)
-                            # Отсекаем ботов, если они нашлись
-                            valid_contacts = [c for c in found_contacts if not c.lower().endswith('bot')]
+                        info_res = requests.get(info_url, headers=headers, timeout=5)
+                        if info_res.status_code == 200:
+                            # Ищем упоминания админов через @ в блоке описания канала
+                            desc_text = info_res.text
+                            # Находим все @username, исключая сам юзернейм канала и ботов
+                            all_mentions = re.findall(r'@[a-zA-Z0-9___]{4,32}', desc_text)
+                            valid_contacts = [m for m in all_mentions if m.lower() != username.lower() and not m.lower().endswith('bot')]
+                            
                             if valid_contacts:
                                 contact = valid_contacts[0]
                     except:
                         pass
-                        
+                    
                     leads.append({
-                        "Канал": ch_username,
+                        "Канал": channel_title,
                         "Ссылка": tg_link,
                         "Контакт для связи": contact,
                         "Статус": "Ожидает отправки оффера"
                     })
-                    time.sleep(1) # Небольшая пауза, чтобы сайт не забанил по IP
+                    time.sleep(1) # Защита от лимитов
                     
-                print(f"   Категория {cat_id} успешно обработана.")
+                print(f"   Категория {category} успешно обработана.")
             else:
-                print(f"   ⚠️ Не удалось открыть страницу категории. Статус: {response.status_code}")
+                print(f"   ⚠️ Ошибка доступа к каталогу. Статус: {response.status_code}")
         except Exception as e:
-            print(f"   ❌ Ошибка запроса: {e}")
+            print(f"   ❌ Сбой сети: {e}")
             continue
 
-    # Сохраняем в файл
+    # Сохранение результатов в Excel
     if leads:
         df = pd.DataFrame(leads)
-        filename = "vpn_leads_telemetr.xlsx"
+        filename = "vpn_leads_telemetr.xlsx" # Оставляем имя файла прежним, чтобы воркфлоу его зацепил
         df.to_excel(filename, index=False, engine='openpyxl')
-        print(f"\n🎉 Сбор успешно окончен! Создано лидов: {len(leads)}")
-        print(f"💾 Файл сохранен на GitHub как: {filename}")
+        print(f"\n🎉 Парсинг успешно завершен! Собрано целевых лидов: {len(leads)}")
+        print(f"💾 Файл готов к скачиванию в артефактах GitHub.")
     else:
-        print("\n❌ Не удалось собрать данные. Сайт заблокировал запрос или изменил структуру страниц.")
+        print("\n❌ База пуста. Проверьте структуру разметки.")
 
 if __name__ == "__main__":
     start_parsing()
